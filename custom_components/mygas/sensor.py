@@ -13,9 +13,17 @@ from homeassistant.const import ATTR_IDENTIFIERS, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory, async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
 
-from .const import ATTR_LAST_UPDATE_TIME, DOMAIN
+from .const import (
+    ATTR_BALANCE,
+    ATTR_LAST_UPDATE_TIME,
+    CONFIGURATION_URL,
+    DOMAIN,
+    MANUFACTURER,
+    MODEL,
+)
 from .coordinator import MyGasCoordinator
 from .entity import MyGasBaseCoordinatorEntity, MyGasSensorEntityDescription
 from .helpers import _to_date, _to_float, _to_str
@@ -40,9 +48,7 @@ SENSOR_TYPES: tuple[MyGasSensorEntityDescription, ...] = (
         name="Задолженность",
         device_class=SensorDeviceClass.MONETARY,
         native_unit_of_measurement="RUB",
-        value_fn=lambda device: _to_float(
-            device.get_lspu_account_data().get("balance")
-        ),
+        value_fn=lambda device: _to_float(device.get_lspu_account_data().get("balance")),
         avabl_fn=lambda device: "balance" in device.get_lspu_account_data(),
         translation_key="balance",
     ),
@@ -174,6 +180,36 @@ class MyGasCounterCoordinatorEntity(MyGasBaseCoordinatorEntity, SensorEntity):
         super()._handle_coordinator_update()
 
 
+class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntity):
+    """Account-level balance sensor (created even when there are no devices)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Остаток на счете"
+    _attr_icon = "mdi:cash"
+    _attr_native_unit_of_measurement = "RUB"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: MyGasCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        # Уникальность по аккаунту (логин = unique_id у entry в config_flow)
+        self._attr_unique_id = f"{entry.unique_id}_account_balance"
+
+        # Отдельное "аккаунтное устройство" — чтобы сенсор был даже без счетчиков
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"{entry.unique_id}_account")},
+            "manufacturer": MANUFACTURER,
+            "model": MODEL,
+            "name": f"MyGas ({entry.unique_id})",
+            "configuration_url": CONFIGURATION_URL,
+        }
+
+    @property
+    def native_value(self):
+        # Координатор должен сохранять баланс в coordinator.data[ATTR_BALANCE]
+        return self.coordinator.data.get(ATTR_BALANCE)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -183,7 +219,10 @@ async def async_setup_entry(
 
     coordinator: MyGasCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[MyGasCounterCoordinatorEntity] = []
+    # 1) ВСЕГДА создаем аккаунтный сенсор баланса (даже если нет устройств/счетчиков)
+    entities: list[SensorEntity] = [MyGasAccountBalanceSensor(coordinator, entry)]
+
+    # 2) Счетчиковые сенсоры создаем только если есть accounts/counters
     for account_id in coordinator.get_accounts():
         for lspu_account_id in range(len(coordinator.get_lspu_accounts(account_id))):
             for counter_id in range(

@@ -23,6 +23,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ATTR_ACCOUNT_ID,
     ATTR_ALIAS,
+    ATTR_BALANCE,
     ATTR_COUNTERS,
     ATTR_ELS,
     ATTR_IS_ELS,
@@ -81,10 +82,71 @@ class MyGasCoordinator(DataUpdateCoordinator):
         auth = SimpleMyGasAuth(self.username, self.password, session)
         self._api = MyGasApi(auth)
 
-    async def async_force_refresh(self):
+    async def async_force_refresh(self) -> None:
         """Force refresh data."""
         self.force_next_update = True
         await self.async_refresh()
+
+    @staticmethod
+    def _get_lspu_list(accounts_info: Any) -> list[dict[str, Any]]:
+        """Return LSPU list from accounts_info with fallback keys."""
+        if not isinstance(accounts_info, dict):
+            return []
+        lspu_list = (
+            accounts_info.get("lspu")
+            or accounts_info.get("lspuGroup")
+            or accounts_info.get("lspuInfoGroup")
+            or []
+        )
+        return lspu_list if isinstance(lspu_list, list) else []
+
+    def _extract_balance_from_info(self, info: Any) -> float | None:
+        """Extract balance from lspuInfo/elsInfo structures returned by API.
+
+        Preferred (as in user's script):
+          lspuInfo.info.services[0].balance
+        Fallback:
+          lspuInfo.info.balance
+        """
+        try:
+            if not isinstance(info, dict):
+                return None
+
+            for _key, items in info.items():
+                if not items:
+                    continue
+
+                # Usually list[dict] for LSPU
+                if isinstance(items, list):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+
+                        # 1) services[0].balance
+                        services = item.get("services")
+                        if isinstance(services, list) and services:
+                            s0 = services[0]
+                            if isinstance(s0, dict) and s0.get("balance") is not None:
+                                return float(s0["balance"])
+
+                        # 2) info.balance
+                        if item.get("balance") is not None:
+                            return float(item["balance"])
+
+                # Sometimes dict
+                if isinstance(items, dict):
+                    services = items.get("services")
+                    if isinstance(services, list) and services:
+                        s0 = services[0]
+                        if isinstance(s0, dict) and s0.get("balance") is not None:
+                            return float(s0["balance"])
+                    if items.get("balance") is not None:
+                        return float(items["balance"])
+
+        except (TypeError, ValueError):
+            return None
+
+        return None
 
     async def _async_update_data(self) -> dict[str, Any] | None:
         """Fetch data from MyGas."""
@@ -93,8 +155,10 @@ class MyGasCoordinator(DataUpdateCoordinator):
             ATTR_LAST_UPDATE_TIME: dt_util.now(),
         }
         self.logger.debug("Start updating data...")
+
         try:
             accounts_info = _data.get(CONF_ACCOUNTS)
+
             if accounts_info is None or self.force_next_update:
                 # get account general information
                 self.logger.debug("Get accounts info for %s", self.username)
@@ -115,31 +179,53 @@ class MyGasCoordinator(DataUpdateCoordinator):
 
             new_data[CONF_ACCOUNTS] = accounts_info
 
-            if accounts_info.get("elsGroup"):
+            # --- Robust branch detection + logging ---
+            els_group = (
+                accounts_info.get("elsGroup") if isinstance(accounts_info, dict) else None
+            )
+            lspu_list = self._get_lspu_list(accounts_info)
+
+            self.logger.debug(
+                "MYGAS accounts_info keys=%s | elsGroup=%s | lspu_list_len=%s",
+                list(accounts_info.keys()) if isinstance(accounts_info, dict) else type(accounts_info),
+                bool(els_group),
+                len(lspu_list),
+            )
+
+            # --- Fill CONF_INFO and balance ---
+            if els_group:
                 self.logger.debug(
                     "Accounts info for els accounts %s retrieved successfully",
                     self.username,
                 )
                 new_data[ATTR_IS_ELS] = True
-                new_data[CONF_INFO] = await self.retrieve_els_accounts_info(
-                    accounts_info
-                )
-            elif accounts_info.get("lspu"):
+                new_data[CONF_INFO] = await self.retrieve_els_accounts_info(accounts_info)
+
+                balance = self._extract_balance_from_info(new_data.get(CONF_INFO))
+                if balance is not None:
+                    new_data[ATTR_BALANCE] = abs(float(balance))
+
+            elif lspu_list:
                 self.logger.debug(
                     "Accounts info for lspu accounts %s retrieved successfully",
                     self.username,
                 )
-
                 new_data[ATTR_IS_ELS] = False
-                new_data[CONF_INFO] = await self.retrieve_lspu_accounts_info(
-                    accounts_info
-                )
+                new_data[CONF_INFO] = await self.retrieve_lspu_accounts_info(accounts_info)
+
+                balance = self._extract_balance_from_info(new_data.get(CONF_INFO))
+                if balance is not None:
+                    new_data[ATTR_BALANCE] = abs(float(balance))
+
             else:
                 self.logger.warning(
-                    "Account %s does not have els or lspu in accounts info",
+                    "Account %s: no elsGroup and no lspu list in accounts_info",
                     self.username,
                 )
-                return None
+                # Important: don't return None; keep integration alive
+                new_data[CONF_INFO] = {}
+                new_data[ATTR_IS_ELS] = False
+                return new_data
 
         except MyGasAuthError as exc:
             raise ConfigEntryAuthFailed("Incorrect Login or Password") from exc
@@ -147,8 +233,8 @@ class MyGasCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error communicating with API: {exc}") from exc
         else:
             self.logger.debug("Data updated successfully for %s", self.username)
+            self.logger.debug("MYGAS new_data keys (final): %s", list(new_data.keys()))
             self.logger.debug("%s", new_data)
-
             return new_data
         finally:
             self.force_next_update = False
@@ -164,10 +250,10 @@ class MyGasCoordinator(DataUpdateCoordinator):
             else:
                 self.update_interval = None
 
-    async def retrieve_els_accounts_info(self, accounts_info):
+    async def retrieve_els_accounts_info(self, accounts_info: dict[str, Any]) -> dict[int, Any]:
         """Retrieve ELS accounts info."""
-        els_list = accounts_info.get("elsGroup")
-        els_info = {}
+        els_list = accounts_info.get("elsGroup") or []
+        els_info: dict[int, Any] = {}
         for els in els_list:
             els_id = els.get("els", {}).get("id")
             if not els_id:
@@ -183,27 +269,32 @@ class MyGasCoordinator(DataUpdateCoordinator):
                 self.logger.warning("Els info for id=%d not retrieved", els_id)
         return els_info
 
-    async def retrieve_lspu_accounts_info(self, accounts_info):
+    async def retrieve_lspu_accounts_info(
+        self, accounts_info: dict[str, Any]
+    ) -> dict[int, list[dict[str, Any]]]:
         """Retrieve LSPU accounts info."""
-        lspu_list = accounts_info.get("lspu")
-        lspu_info = {}
+        lspu_list = self._get_lspu_list(accounts_info)
+        lspu_info: dict[int, list[dict[str, Any]]] = {}
+
         for lspu in lspu_list:
             lspu_id = lspu.get("id")
             if not lspu_id:
-                self.logger.warning("id not found in lspu info")
+                self.logger.warning("id not found in lspu info item: %s", lspu)
                 continue
 
             lspu_id = int(lspu_id)
             self.logger.debug("Get lspu info for %s", lspu_id)
+
             lspu_item_info = await self._async_get_lspu_info(lspu_id)
             if lspu_item_info:
-                if lspu_item_info is list:
+                if isinstance(lspu_item_info, list):
                     lspu_info[lspu_id] = lspu_item_info
                 else:
                     lspu_info[lspu_id] = [lspu_item_info]
                 self.logger.debug("Lspu info for %s retrieved successfully", lspu_id)
             else:
                 self.logger.warning("Lspu info for %s not retrieved", lspu_id)
+
         return lspu_info
 
     def get_accounts(self) -> dict[int, dict[str | int, Any]]:
@@ -248,7 +339,8 @@ class MyGasCoordinator(DataUpdateCoordinator):
         _accounts = self.get_lspu_accounts(account_id)[lspu_acount_id]
         counters = _accounts.get(ATTR_COUNTERS, [])
         if not counters:
-            self.logger.warning(
+            # This is a normal situation (account may not have counters)
+            self.logger.debug(
                 "No counters found for account_id=%d lspu_account_id=%d",
                 account_id,
                 lspu_acount_id,
@@ -279,6 +371,7 @@ class MyGasCoordinator(DataUpdateCoordinator):
                         (DOMAIN, make_device_id(_account_number, _counter_uuid))
                     }:
                         return account_id, lspu_account_id, counter_id
+
         return None, None, None
 
     @async_api_request_handler
@@ -378,10 +471,12 @@ class MyGasCoordinator(DataUpdateCoordinator):
             els_id = account_id
         else:
             els_id = None
+
         counters = self.get_counters(account_id, lspu_account_id)
         assert counters
         equipment_uuid = counters[counter_id][ATTR_UUID]
         assert equipment_uuid
+
         return await self._async_send_readings(
             lspu_id,
             equipment_uuid,
