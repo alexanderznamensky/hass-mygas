@@ -29,7 +29,6 @@ from .entity import MyGasBaseCoordinatorEntity, MyGasSensorEntityDescription
 from .helpers import _to_date, _to_float, _to_str
 
 SENSOR_TYPES: tuple[MyGasSensorEntityDescription, ...] = (
-    # Информация по счету
     MyGasSensorEntityDescription(
         key="account",
         name="Лицевой счет",
@@ -187,15 +186,12 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
     _attr_name = "Баланс"
     _attr_icon = "mdi:cash"
     _attr_native_unit_of_measurement = "RUB"
-    # _attr_device_class = SensorDeviceClass.MONETARY
     entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: MyGasCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
-        # Уникальность по аккаунту (логин = unique_id у entry в config_flow)
         self._attr_unique_id = f"{entry.unique_id}_account_balance"
 
-        # Отдельное "аккаунтное устройство" — чтобы сенсор был даже без счетчиков
         self._attr_device_info = {
             "identifiers": {(DOMAIN, f"{entry.unique_id}_account")},
             "manufacturer": MANUFACTURER,
@@ -206,8 +202,22 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
 
     @property
     def native_value(self):
-        # Координатор должен сохранять баланс в coordinator.data[ATTR_BALANCE]
         return self.coordinator.data.get(ATTR_BALANCE)
+
+    @property
+    def extra_state_attributes(self):
+        """Attributes include tariff price."""
+        data = self.coordinator.data or {}
+        price = None
+
+        try:
+            price = data.get("counter", {}).get("price", {}).get("day")
+        except Exception:
+            price = None
+
+        return {
+            "tariff": price,
+        }
 
 
 async def async_setup_entry(
@@ -219,10 +229,8 @@ async def async_setup_entry(
 
     coordinator: MyGasCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # 1) ВСЕГДА создаем аккаунтный сенсор баланса (даже если нет устройств/счетчиков)
     entities: list[SensorEntity] = [MyGasAccountBalanceSensor(coordinator, entry)]
 
-    # 2) Счетчиковые сенсоры создаем только если есть accounts/counters
     for account_id in coordinator.get_accounts():
         for lspu_account_id in range(len(coordinator.get_lspu_accounts(account_id))):
             for counter_id in range(
