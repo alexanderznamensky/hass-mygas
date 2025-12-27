@@ -42,7 +42,7 @@ from .const import (
 )
 from .decorators import async_api_request_handler
 from .helpers import get_update_interval, make_device_id
-
+from .helpers import _to_float
 
 class MyGasCoordinator(DataUpdateCoordinator):
     """Coordinator is responsible for querying the device at a specified route."""
@@ -116,24 +116,20 @@ class MyGasCoordinator(DataUpdateCoordinator):
                 if not items:
                     continue
 
-                # Usually list[dict] for LSPU
                 if isinstance(items, list):
                     for item in items:
                         if not isinstance(item, dict):
                             continue
 
-                        # 1) services[0].balance
                         services = item.get("services")
                         if isinstance(services, list) and services:
                             s0 = services[0]
                             if isinstance(s0, dict) and s0.get("balance") is not None:
                                 return float(s0["balance"])
 
-                        # 2) info.balance
                         if item.get("balance") is not None:
                             return float(item["balance"])
 
-                # Sometimes dict
                 if isinstance(items, dict):
                     services = items.get("services")
                     if isinstance(services, list) and services:
@@ -147,6 +143,72 @@ class MyGasCoordinator(DataUpdateCoordinator):
             return None
 
         return None
+
+    def _extract_tariff_info(self, info: Any) -> dict[str, Any]:
+        """
+           Extract tariff-related fields from lspu/els info.
+           Возвращает словарь с полями:
+           tariff_name, consumption_standard, price, tariff_price,
+           provider_name, service_name
+        """
+        result: dict[str, Any] = {}
+
+        if not isinstance(info, dict):
+            return result
+
+        def _process_item(item: dict[str, Any]) -> dict[str, Any]:
+            services = item.get("services")
+            if not isinstance(services, list):
+                return {}
+
+            for service in services:
+                if not isinstance(service, dict):
+                    continue
+
+                children = service.get("children") or []
+                if not isinstance(children, list) or not children:
+                    continue
+
+                child = children[0]
+                if not isinstance(child, dict):
+                    continue
+
+                out: dict[str, Any] = {
+                    "tariff_name": child.get("name"),
+                    "consumption_standard": _to_float(child.get("norm")),
+                    "price": _to_float(child.get("price")),
+                    "tariff_price": _to_float(child.get("tariff")),
+                    "provider_name": service.get("providerName") or item.get("providerName"),
+                    "service_name": service.get("name"),
+                }
+
+                if any(v is not None for v in out.values()):
+                    return out
+
+            return {}
+
+        try:
+            for _key, items in info.items():
+                if not items:
+                    continue
+
+                if isinstance(items, list):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        out = _process_item(item)
+                        if out:
+                            return out
+                elif isinstance(items, dict):
+                    out = _process_item(items)
+                    if out:
+                        return out
+
+        except Exception:
+            self.logger.exception("Failed to extract tariff info from MyGas data")
+
+        return result
+
 
     async def _async_update_data(self) -> dict[str, Any] | None:
         """Fetch data from MyGas."""
@@ -192,7 +254,6 @@ class MyGasCoordinator(DataUpdateCoordinator):
                 len(lspu_list),
             )
 
-            # --- Fill CONF_INFO and balance ---
             if els_group:
                 self.logger.debug(
                     "Accounts info for els accounts %s retrieved successfully",
@@ -222,14 +283,18 @@ class MyGasCoordinator(DataUpdateCoordinator):
                     "Account %s: no elsGroup and no lspu list in accounts_info",
                     self.username,
                 )
-                # Important: don't return None; keep integration alive
                 new_data[CONF_INFO] = {}
                 new_data[ATTR_IS_ELS] = False
                 return new_data
 
+            tariff_info = self._extract_tariff_info(new_data.get(CONF_INFO))
+            if tariff_info:
+                new_data.update(tariff_info)
+
+
         except MyGasAuthError as exc:
             raise ConfigEntryAuthFailed("Incorrect Login or Password") from exc
-        except Exception as exc:  # pylint: disable=broad-except
+        except Exception as exc:
             raise UpdateFailed(f"Error communicating with API: {exc}") from exc
         else:
             self.logger.debug("Data updated successfully for %s", self.username)
@@ -339,7 +404,6 @@ class MyGasCoordinator(DataUpdateCoordinator):
         _accounts = self.get_lspu_accounts(account_id)[lspu_acount_id]
         counters = _accounts.get(ATTR_COUNTERS, [])
         if not counters:
-            # This is a normal situation (account may not have counters)
             self.logger.debug(
                 "No counters found for account_id=%d lspu_account_id=%d",
                 account_id,
@@ -424,7 +488,7 @@ class MyGasCoordinator(DataUpdateCoordinator):
         """Get receipt data."""
         return await self._api.async_get_receipt(
             date_iso_short,
-            email,  # pyright: ignore[reportArgumentType]
+            email,
             account_number,
             is_els,
         )
