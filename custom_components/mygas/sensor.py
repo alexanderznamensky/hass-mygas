@@ -184,7 +184,7 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
     """Account-level balance sensor (created even when there are no devices)."""
 
     _attr_has_entity_name = True
-    _attr_name = "Остаток на счете"
+    _attr_name = "Баланс"
     _attr_icon = "mdi:cash"
     _attr_native_unit_of_measurement = "RUB"
     # _attr_device_class = SensorDeviceClass.MONETARY
