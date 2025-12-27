@@ -187,7 +187,7 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
     _attr_name = "Остаток на счете"
     _attr_icon = "mdi:cash"
     _attr_native_unit_of_measurement = "RUB"
-    _attr_device_class = SensorDeviceClass.MONETARY
+    # _attr_device_class = SensorDeviceClass.MONETARY
     entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: MyGasCoordinator, entry: ConfigEntry) -> None:
