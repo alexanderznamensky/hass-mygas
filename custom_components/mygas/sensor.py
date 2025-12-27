@@ -206,21 +206,16 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
 
     @property
     def extra_state_attributes(self):
-        """Attributes include tariff price."""
         data = self.coordinator.data or {}
-        price = None
-
-        tariff = (
-            data.get("counter", {}).get("price", {}).get("day")
-            if isinstance(data.get("counter", {}), dict)
-            else None
-        )
-
-        last_update = data.get(ATTR_LAST_UPDATE_TIME)
 
         return {
-            "tariff": tariff,
-            "last_update": last_update,
+            "tariff_name": data.get("tariff_name"),
+            "consumption_standard": data.get("consumption_standard"),
+            "price": data.get("price"),
+            "tariff_price": data.get("tariff_price"),
+            "provider_name": data.get("provider_name"),
+            "service_name": data.get("service_name"),
+            "last_update": data.get(ATTR_LAST_UPDATE_TIME),
         }
 
 async def async_setup_entry(
