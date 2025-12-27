@@ -183,7 +183,7 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
     """Account-level balance sensor (created even when there are no devices)."""
 
     _attr_has_entity_name = True
-    _attr_name = "Баланс"
+    _attr_name = "Баланс МосГАЗ"
     _attr_icon = "mdi:cash"
     _attr_native_unit_of_measurement = "RUB"
     entity_category = EntityCategory.DIAGNOSTIC
@@ -210,15 +210,18 @@ class MyGasAccountBalanceSensor(CoordinatorEntity[MyGasCoordinator], SensorEntit
         data = self.coordinator.data or {}
         price = None
 
-        try:
-            price = data.get("counter", {}).get("price", {}).get("day")
-        except Exception:
-            price = None
+        tariff = (
+            data.get("counter", {}).get("price", {}).get("day")
+            if isinstance(data.get("counter", {}), dict)
+            else None
+        )
+
+        last_update = data.get(ATTR_LAST_UPDATE_TIME)
 
         return {
-            "tariff": price,
+            "tariff": tariff,
+            "last_update": last_update,
         }
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
